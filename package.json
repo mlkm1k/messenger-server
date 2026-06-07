@@ -4,15 +4,13 @@
   "description": "Сервер для мессенджера",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "postinstall": "npm rebuild sqlite3"
   },
   "dependencies": {
     "express": "^4.18.2",
     "ws": "^8.14.2",
     "sqlite3": "^5.1.6",
     "cors": "^2.8.5"
-  },
-  "keywords": ["messenger", "chat", "websocket"],
-  "author": "Your Name",
-  "license": "MIT"
+  }
 }

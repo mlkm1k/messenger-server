@@ -1,7 +1,6 @@
 {
   "name": "messenger-server",
   "version": "1.0.0",
-  "description": "Сервер для мессенджера",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

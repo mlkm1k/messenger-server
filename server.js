@@ -19,6 +19,7 @@ db.serialize(() => {
         id TEXT PRIMARY KEY,
         username TEXT UNIQUE,
         nickname TEXT,
+        avatar TEXT DEFAULT '👤',
         avatarUri TEXT,
         last_seen INTEGER,
         is_online INTEGER DEFAULT 0
@@ -29,7 +30,9 @@ db.serialize(() => {
         name TEXT,
         is_group INTEGER DEFAULT 0,
         created_by TEXT,
-        created_at INTEGER
+        created_at INTEGER,
+        last_message TEXT,
+        last_message_time INTEGER
     )`);
 
     db.run(`CREATE TABLE IF NOT EXISTS chat_members (
@@ -54,6 +57,10 @@ function generateId() {
     return Date.now().toString(36) + Math.random().toString(36).substr(2, 6);
 }
 
+function updateLastMessage(chatId, text, timestamp) {
+    db.run('UPDATE chats SET last_message = ?, last_message_time = ? WHERE id = ?', [text, timestamp, chatId]);
+}
+
 // ========== API ==========
 
 // Авторизация
@@ -76,7 +83,7 @@ app.post('/api/auth', (req, res) => {
 
 // Получить всех пользователей
 app.get('/api/users', (req, res) => {
-    db.all('SELECT id, username, nickname, avatarUri, is_online, last_seen FROM users', (err, users) => {
+    db.all('SELECT id, username, nickname, avatar, avatarUri, is_online, last_seen FROM users', (err, users) => {
         res.json(users || []);
     });
 });
@@ -94,10 +101,28 @@ app.post('/api/update-profile', (req, res) => {
     });
 });
 
-// Личный чат
+// Получить или создать личный чат (включая "Избранное" с самим собой)
 app.post('/api/get-private-chat', (req, res) => {
     const { userId, friendId } = req.body;
 
+    // Если это чат с самим собой (Избранное)
+    if (userId === friendId) {
+        const chatId = `saved_${userId}`;
+        db.get('SELECT id FROM chats WHERE id = ?', [chatId], (err, existing) => {
+            if (existing) {
+                res.json({ chatId });
+            } else {
+                db.run('INSERT INTO chats (id, name, is_group, created_at, last_message, last_message_time) VALUES (?, ?, 0, ?, ?, ?)', 
+                       [chatId, 'Избранное', Date.now(), null, null]);
+                db.run('INSERT INTO chat_members (chat_id, user_id, joined_at) VALUES (?, ?, ?)', 
+                       [chatId, userId, Date.now()]);
+                res.json({ chatId });
+            }
+        });
+        return;
+    }
+
+    // Обычный личный чат с другом
     db.get(`
         SELECT c.id FROM chats c
         JOIN chat_members cm1 ON c.id = cm1.chat_id
@@ -108,8 +133,8 @@ app.post('/api/get-private-chat', (req, res) => {
             res.json({ chatId: existing.id });
         } else {
             const chatId = generateId();
-            db.run('INSERT INTO chats (id, name, is_group, created_at) VALUES (?, ?, 0, ?)', 
-                   [chatId, 'private', Date.now()]);
+            db.run('INSERT INTO chats (id, name, is_group, created_at, last_message, last_message_time) VALUES (?, ?, 0, ?, ?, ?)', 
+                   [chatId, 'private', Date.now(), null, null]);
             db.run('INSERT INTO chat_members (chat_id, user_id, joined_at) VALUES (?, ?, ?)', 
                    [chatId, userId, Date.now()]);
             db.run('INSERT INTO chat_members (chat_id, user_id, joined_at) VALUES (?, ?, ?)', 
@@ -125,8 +150,8 @@ app.post('/api/create-group', (req, res) => {
     const chatId = generateId();
     const allMembers = [creatorId, ...(memberIds || [])];
 
-    db.run('INSERT INTO chats (id, name, is_group, created_by, created_at) VALUES (?, ?, 1, ?, ?)',
-           [chatId, name, creatorId, Date.now()]);
+    db.run('INSERT INTO chats (id, name, is_group, created_by, created_at, last_message, last_message_time) VALUES (?, ?, 1, ?, ?, ?, ?)',
+           [chatId, name, creatorId, Date.now(), null, null]);
 
     allMembers.forEach(userId => {
         db.run('INSERT INTO chat_members (chat_id, user_id, joined_at) VALUES (?, ?, ?)',
@@ -170,6 +195,7 @@ app.get('/api/chats/:userId', (req, res) => {
         SELECT c.* FROM chats c
         JOIN chat_members cm ON c.id = cm.chat_id
         WHERE cm.user_id = ?
+        ORDER BY c.last_message_time DESC
     `, [userId], (err, chats) => {
         if (!chats || chats.length === 0) {
             res.json([]);
@@ -192,6 +218,18 @@ app.get('/api/chats/:userId', (req, res) => {
                 });
                 count++;
                 if (count === chats.length) res.json(result);
+            } else if (chat.name === 'Избранное') {
+                result.push({
+                    id: chat.id,
+                    name: 'Избранное',
+                    is_group: false,
+                    avatar: '⭐',
+                    avatarUri: null,
+                    last_message: chat.last_message,
+                    last_message_time: chat.last_message_time
+                });
+                count++;
+                if (count === chats.length) res.json(result);
             } else {
                 db.get(`
                     SELECT u.nickname, u.username, u.avatarUri FROM users u
@@ -202,7 +240,7 @@ app.get('/api/chats/:userId', (req, res) => {
                         id: chat.id,
                         name: friend?.nickname || friend?.username || 'Друг',
                         is_group: false,
-                        avatar: friend?.avatar || '👤',
+                        avatar: '👤',
                         avatarUri: friend?.avatarUri || null,
                         last_message: chat.last_message,
                         last_message_time: chat.last_message_time
@@ -265,6 +303,7 @@ wss.on('connection', (ws) => {
                 db.run(`INSERT INTO messages (chat_id, sender_id, text, timestamp) 
                         VALUES (?, ?, ?, ?)`,
                        [msg.chatId, msg.userId, msg.text, Date.now()], function() {
+                    updateLastMessage(msg.chatId, msg.text, Date.now());
                     sendToChat(msg.chatId, {
                         type: 'new_message',
                         id: this.lastID,
